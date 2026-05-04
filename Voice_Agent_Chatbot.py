@@ -1,8 +1,8 @@
 """
-Lecture 9 Practice - voice-driven research assistant.
+Voice_Agent_Chatbot.py - voice-driven research assistant.
 
 Run:
-    python Lecture_9_Practice.py
+    python Voice_Agent_Chatbot.py
 then open http://localhost:8000 in your browser.
 
 Pipeline:
@@ -94,7 +94,7 @@ def build_system_prompt() -> str:
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
-app = FastAPI(title="Lecture 9 - Voice Research Assistant")
+app = FastAPI(title="Voice Agent Chatbot")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -390,7 +390,7 @@ def health() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     uvicorn.run(
-        "Lecture_9_Practice:app",
+        "Voice_Agent_Chatbot:app",
         host="127.0.0.1",
         port=8000,
         reload=False,
