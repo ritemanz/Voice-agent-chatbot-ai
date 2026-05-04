@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Voice Research Assistant</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <aside id="sidebar">
+      <div class="sidebar-header">
+        <h2>Chats</h2>
+        <button id="new-chat-btn" title="Create a new chat">+ New</button>
+      </div>
+      <ul id="chat-list"></ul>
+      <div class="sidebar-footer">
+        <div id="learning-stats" class="muted small"></div>
+        <div class="muted small">Auto-synced to Notion</div>
+      </div>
+    </aside>
+
+    <main id="main">
+      <header id="topbar">
+        <div>
+          <h1 id="chat-title">New chat</h1>
+          <div id="chat-meta" class="muted small"></div>
+        </div>
+        <div class="topbar-right">
+          <a id="notion-link" class="notion-link" target="_blank" rel="noopener noreferrer" hidden>View on Notion ↗</a>
+          <div id="status" class="muted small">idle</div>
+        </div>
+      </header>
+
+      <section id="messages"></section>
+
+      <footer id="composer">
+        <button id="record-btn" class="record">
+          <span class="dot"></span>
+          <span class="label">Hold / click to record</span>
+        </button>
+        <textarea
+          id="text-input"
+          rows="2"
+          placeholder="…or type your question here"
+        ></textarea>
+        <button id="send-btn">Send</button>
+      </footer>
+    </main>
+
+    <script src="/static/script.js"></script>
+  </body>
+</html>

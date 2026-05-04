@@ -1,0 +1,17 @@
+{
+  "good": {
+    "struct::is_concise": 1
+  },
+  "bad": {},
+  "history": [
+    {
+      "session_id": "514120b66889",
+      "rating": "good",
+      "features": [
+        "struct::is_concise"
+      ],
+      "user_query": "can you answer this in korean?",
+      "response_preview": "\ub124, \uc9c8\ubb38\ud574 \uc8fc\uc138\uc694!"
+    }
+  ]
+}
