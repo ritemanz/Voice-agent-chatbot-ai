@@ -31,7 +31,7 @@ from pydantic import BaseModel
 
 import chat_manager
 import learning
-from tools import TOOL_SCHEMAS, dispatch_tool
+from tools import TOOL_SCHEMAS, dispatch_tool, _sync_chat_to_notion
 
 # ---------------------------------------------------------------------------
 # Setup
@@ -253,6 +253,19 @@ def chat(req: ChatRequest) -> dict[str, Any]:
             result["tts_error"] = str(exc)
 
     chat = chat_manager.load_chat(session_id)
+
+    # Background auto-sync to Notion: create the page on the first turn,
+    # append only the newly-added messages on every subsequent turn.
+    if chat is not None and os.getenv("NOTION_API_KEY") and os.getenv("NOTION_PARENT_PAGE_ID"):
+        try:
+            sync_state = {**chat, "session_id": session_id}
+            sync_result = _sync_chat_to_notion(sync_state)
+            if not sync_result.get("ok"):
+                result.setdefault("notion_error", sync_result.get("error"))
+            chat = chat_manager.load_chat(session_id)
+        except Exception as exc:  # noqa: BLE001
+            result.setdefault("notion_error", str(exc))
+
     return {
         "session_id": session_id,
         "reply": result["text"],
@@ -338,11 +351,53 @@ def sync_notion(req: SyncRequest) -> dict[str, Any]:
     chat = chat_manager.load_chat(req.session_id)
     if chat is None:
         raise HTTPException(404, "session not found")
-    return dispatch_tool(
-        "sync_to_notion",
-        {"session_id": req.session_id},
-        {"session_id": req.session_id, "title": chat["title"], "messages": chat["messages"]},
-    )
+    sync_state = {**chat, "session_id": req.session_id}
+    return _sync_chat_to_notion(sync_state)
+
+
+@app.post("/api/sync_notion/all")
+def sync_notion_all() -> dict[str, Any]:
+    """Push every locally-stored chat to Notion (creates pages where missing,
+    appends new messages where a page already exists)."""
+    if not (os.getenv("NOTION_API_KEY") and os.getenv("NOTION_PARENT_PAGE_ID")):
+        raise HTTPException(400, "Notion is not configured (.env)")
+    return _backfill_all_chats_to_notion()
+
+
+def _backfill_all_chats_to_notion() -> dict[str, Any]:
+    summary: dict[str, Any] = {"synced": 0, "skipped": 0, "errors": []}
+    for entry in chat_manager.list_chats():
+        chat = chat_manager.load_chat(entry["id"])
+        if chat is None or not chat.get("messages"):
+            summary["skipped"] += 1
+            continue
+        try:
+            res = _sync_chat_to_notion({**chat, "session_id": chat["id"]})
+            if res.get("ok"):
+                summary["synced"] += 1
+            else:
+                summary["errors"].append({"id": chat["id"], "error": res.get("error")})
+        except Exception as exc:  # noqa: BLE001
+            summary["errors"].append({"id": chat["id"], "error": str(exc)})
+    return summary
+
+
+@app.on_event("startup")
+def _startup_notion_backfill() -> None:
+    """On boot, push any existing chats to Notion so historic conversations
+    get recorded (and any newer turns get appended to existing pages)."""
+    if not (os.getenv("NOTION_API_KEY") and os.getenv("NOTION_PARENT_PAGE_ID")):
+        return
+    try:
+        result = _backfill_all_chats_to_notion()
+        print(
+            f"[notion] startup backfill: synced={result['synced']} "
+            f"skipped={result['skipped']} errors={len(result['errors'])}"
+        )
+        for err in result["errors"]:
+            print(f"[notion]   error syncing {err['id']}: {err['error']}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[notion] startup backfill failed: {exc}")
 
 
 # ---------------------------------------------------------------------------

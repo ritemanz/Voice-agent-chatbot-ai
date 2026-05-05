@@ -2,7 +2,7 @@
   "id": "d7b2644fe105",
   "title": "What is 5 plus 5?",
   "created_at": "2026-04-27T19:16:17Z",
-  "updated_at": "2026-04-27T19:25:37Z",
+  "updated_at": "2026-05-04T22:53:46Z",
   "messages": [
     {
       "role": "user",
@@ -60,5 +60,8 @@
       "rating": null,
       "audio_url": "/audio/out_07a85df8f3c54228abeb32baeaec4086.mp3"
     }
-  ]
+  ],
+  "notion_page_id": "3568e7ab-859e-810a-ac8c-c62e317758b7",
+  "notion_url": "https://www.notion.so/What-is-5-plus-5-d7b2644fe105-3568e7ab859e810aac8cc62e317758b7",
+  "notion_synced_count": 8
 }

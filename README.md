@@ -17,24 +17,116 @@ the lecture:
 
 ## 1. Install
 
-```bash
-# from inside Lecture_9_Practice_env (the venv directory)
-.\Scripts\activate          # Windows PowerShell
-pip install -r requirements.txt
-```
-
-## 2. Configure
+You need **Python 3.11+** on your `PATH`. Clone the repo, then from the
+project root run:
 
 ```bash
-copy .env.example .env       # Windows
-# then edit .env and fill in OPENAI_API_KEY, NOTION_API_KEY, NOTION_PARENT_PAGE_ID
+python bootstrap.py
 ```
 
-For Notion: create an internal integration at
-<https://www.notion.so/my-integrations>, copy its secret into `NOTION_API_KEY`,
-then open a Notion page, click **Share → Add connections**, pick your
-integration, and put that page's ID (the 32-char string in its URL) into
-`NOTION_PARENT_PAGE_ID`.
+That single command creates a local virtual environment at `.venv/`,
+upgrades `pip` inside it, and installs everything from `requirements.txt`.
+It is idempotent — re-running it just reuses the existing `.venv/`.
+
+Then activate the venv:
+
+```powershell
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+```
+
+```bash
+# macOS / Linux
+source .venv/bin/activate
+```
+
+> Why a bootstrap script? `pyvenv.cfg`, `Lib/`, and `Scripts/` are
+> machine-specific (they hard-code paths to the Python install that created
+> them), so they are intentionally **not** committed. Each cloner generates
+> their own venv with paths that match their own machine.
+
+## 2. Configure your API keys
+
+The app reads its credentials from a local `.env` file. **You must add your
+own keys before the app will work** — the repo ships with placeholder values
+only.
+
+### 2.1 Create your `.env`
+
+```powershell
+# Windows PowerShell
+copy .env.example .env
+```
+
+```bash
+# macOS / Linux
+cp .env.example .env
+```
+
+Then open `.env` in your editor and replace the placeholder values for the
+three required variables below.
+
+### 2.2 `OPENAI_API_KEY` (required)
+
+Used for Whisper ASR, chat completion (function-calling), and TTS.
+
+1. Go to <https://platform.openai.com/api-keys>.
+2. Click **Create new secret key**, copy the value (it starts with `sk-...`).
+3. Paste it into `.env`:
+
+   ```
+   OPENAI_API_KEY=sk-...your-real-key...
+   ```
+
+### 2.3 `NOTION_API_KEY` (required for Notion sync)
+
+This is the secret of a Notion **internal integration** — it lets the app
+create pages in your workspace.
+
+1. Go to <https://www.notion.so/my-integrations>.
+2. Click **+ New integration**, give it a name (e.g. "Voice Research
+   Assistant"), pick the workspace, and submit.
+3. Copy the **Internal Integration Secret** (starts with `ntn_...` /
+   `secret_...`) and paste it into `.env`:
+
+   ```
+   NOTION_API_KEY=ntn_...your-real-secret...
+   ```
+
+### 2.4 `NOTION_PARENT_PAGE_ID` (required for Notion sync)
+
+This is the Notion page that will become the parent of every chat page the
+app creates.
+
+1. In Notion, create or pick the page where you want chats to live (e.g. a
+   page called "AI Chats").
+2. On that page, click **Share → Add connections** and select the integration
+   you created above. **Without this step the API will return
+   `object_not_found`.**
+3. Copy the page's URL. The ID is the 32-character hex string at the end —
+   for example, in
+   `https://www.notion.so/My-Page-3538e7ab859e80bfa945ecc07e04512d`,
+   the ID is `3538e7ab859e80bfa945ecc07e04512d`. Dashes are optional.
+4. Paste it into `.env`:
+
+   ```
+   NOTION_PARENT_PAGE_ID=3538e7ab859e80bfa945ecc07e04512d
+   ```
+
+> **Note**: `.env` is in `.gitignore` and will not be committed. Don't paste
+> real secrets into `.env.example`.
+
+### 2.5 Verify
+
+After starting the server, hit <http://localhost:8000/api/health> — you
+should see:
+
+```json
+{ "ok": true, "openai_configured": true, "notion_configured": true, ... }
+```
+
+If `notion_configured` is `false`, double-check `NOTION_API_KEY` and
+`NOTION_PARENT_PAGE_ID` in your `.env`.
 
 ## 3. Run
 
@@ -110,6 +202,3 @@ Lecture_9_Practice_env/
     ├── audio/                TTS / ASR temp + cached audio
     └── feedback.json         continuous-learning memory
 ```
-"# Voice-agent-chatbot-ai" 
-"# Voice-agent-chatbot-ai" 
-"# Voice-agent-chatbot-ai" 

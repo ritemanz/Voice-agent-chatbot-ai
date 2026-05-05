@@ -2,7 +2,7 @@
   "id": "75f3a7fca76a",
   "title": "Is Aspertin good for you? Respond with academic research and",
   "created_at": "2026-04-27T19:27:17Z",
-  "updated_at": "2026-04-27T19:28:40Z",
+  "updated_at": "2026-05-04T22:53:45Z",
   "messages": [
     {
       "role": "user",
@@ -84,5 +84,8 @@
       "rating": null,
       "audio_url": "/audio/out_881d747c096947b98a7191b9ae8ee411.mp3"
     }
-  ]
+  ],
+  "notion_page_id": "3568e7ab-859e-814e-821f-f27517113599",
+  "notion_url": "https://www.notion.so/Is-Aspertin-good-for-you-Respond-with-academic-research-and-75f3a7fca76a-3568e7ab859e814e821ff27517113599",
+  "notion_synced_count": 8
 }

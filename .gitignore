@@ -1,0 +1,25 @@
+# Secrets
+.env
+.env.local
+.env.*.local
+
+# Local data (chats, audio, learning memory)
+data/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtualenv (this folder is itself a venv on Windows)
+Lib/
+Scripts/
+Include/
+share/
+pyvenv.cfg
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

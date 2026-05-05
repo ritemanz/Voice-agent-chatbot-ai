@@ -15,6 +15,8 @@ from typing import Any
 import arxiv
 from notion_client import Client as NotionClient
 
+import chat_manager
+
 
 # ---------------------------------------------------------------------------
 # ArXiv search
@@ -295,7 +297,65 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "sync_to_notion",
+            "description": (
+                "Save / sync the current chat to Notion. On first call this "
+                "creates a fresh Notion page; subsequent calls append only "
+                "the newly-added messages to the existing page. Call this "
+                "when the user explicitly asks to save / sync / export the "
+                "conversation."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Chat session id. Optional - the server already knows the active session.",
+                    }
+                },
+                "required": [],
+            },
+        },
+    },
 ]
+
+
+def _sync_chat_to_notion(chat_state: dict[str, Any]) -> dict[str, Any]:
+    """Sync (create-or-append) the chat referenced by ``chat_state`` to Notion.
+
+    ``chat_state`` is expected to come from ``chat_manager.load_chat`` and to
+    contain at least ``session_id``/``id``, ``title``, ``messages``,
+    ``notion_page_id``, ``notion_synced_count``. The persisted notion state
+    is updated via ``chat_manager.update_notion_state`` on success.
+    """
+    session_id = chat_state.get("session_id") or chat_state.get("id")
+    if not session_id:
+        return {"ok": False, "error": "missing session_id"}
+
+    fresh = chat_manager.load_chat(session_id) or chat_state
+    title = fresh.get("title") or f"Chat {session_id}"
+    messages = fresh.get("messages", [])
+    page_id = fresh.get("notion_page_id")
+    synced_count = int(fresh.get("notion_synced_count") or 0)
+
+    result = sync_to_notion(
+        session_id=session_id,
+        content={"title": title, "messages": messages},
+        page_id=page_id,
+        synced_count=synced_count,
+    )
+
+    if result.get("ok"):
+        chat_manager.update_notion_state(
+            session_id,
+            page_id=result.get("page_id") or page_id,
+            url=result.get("url"),
+            synced_count=result.get("synced_count", len(messages)),
+        )
+    return result
 
 
 def dispatch_tool(name: str, arguments: dict[str, Any], chat_state: dict[str, Any]) -> Any:
@@ -305,4 +365,6 @@ def dispatch_tool(name: str, arguments: dict[str, Any], chat_state: dict[str, An
             query=arguments.get("query", ""),
             max_results=int(arguments.get("max_results", 3) or 3),
         )
+    if name == "sync_to_notion":
+        return _sync_chat_to_notion(chat_state)
     return {"error": f"Unknown tool '{name}'."}
