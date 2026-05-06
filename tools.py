@@ -9,6 +9,7 @@ Currently:
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from typing import Any
 
@@ -16,6 +17,11 @@ import arxiv
 from notion_client import Client as NotionClient
 
 import chat_manager
+
+# A chat page's Notion title looks like "<title>  (<session_id>)" - see
+# create_notion_page. Extract that trailing session id back out so we can
+# rebuild the chat list from Notion.
+_SESSION_ID_IN_TITLE = re.compile(r"\(([0-9a-fA-F]{8,32})\)\s*$")
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +158,57 @@ def create_notion_page(
 
 def _rich_text_to_plain(rich: list[dict[str, Any]]) -> str:
     return "".join(item.get("plain_text", "") for item in rich or [])
+
+
+def list_notion_chat_pages(parent_id: str | None = None) -> dict[str, Any]:
+    """List every direct child page of the configured Notion parent page that
+    looks like one of our chat pages (title ends with ``(<session_id>)``).
+
+    Returns ``{"ok": bool, "chats": [{session_id, page_id, url, title}], "error": ...}``.
+    """
+    notion = _notion_client()
+    parent = parent_id or os.getenv("NOTION_PARENT_PAGE_ID")
+    if notion is None or not parent:
+        return {"ok": False, "chats": [], "error": "Notion not configured."}
+
+    try:
+        results: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            kwargs: dict[str, Any] = {"block_id": parent, "page_size": 100}
+            if cursor:
+                kwargs["start_cursor"] = cursor
+            resp = notion.blocks.children.list(**kwargs)
+            results.extend(resp.get("results", []))
+            if not resp.get("has_more"):
+                break
+            cursor = resp.get("next_cursor")
+
+        chats: list[dict[str, Any]] = []
+        for blk in results:
+            if blk.get("type") != "child_page":
+                continue
+            title = (blk.get("child_page") or {}).get("title", "") or ""
+            match = _SESSION_ID_IN_TITLE.search(title)
+            if not match:
+                # A page in the parent that wasn't created by our sync code -
+                # ignore it so we don't pollute the sidebar with unrelated
+                # Notion pages.
+                continue
+            session_id = match.group(1)
+            page_id = blk.get("id", "").replace("-", "")
+            display_title = _SESSION_ID_IN_TITLE.sub("", title).strip()
+            chats.append(
+                {
+                    "session_id": session_id,
+                    "page_id": page_id,
+                    "url": f"https://www.notion.so/{page_id}",
+                    "title": display_title or "Chat",
+                }
+            )
+        return {"ok": True, "chats": chats, "error": None}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "chats": [], "error": str(exc)}
 
 
 def fetch_notion_page_messages(page_id: str) -> dict[str, Any]:

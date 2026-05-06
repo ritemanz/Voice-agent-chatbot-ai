@@ -31,7 +31,13 @@ from pydantic import BaseModel
 
 import chat_manager
 import learning
-from tools import TOOL_SCHEMAS, dispatch_tool, _sync_chat_to_notion
+from tools import (
+    TOOL_SCHEMAS,
+    _sync_chat_to_notion,
+    dispatch_tool,
+    fetch_notion_page_messages,
+    list_notion_chat_pages,
+)
 
 # ---------------------------------------------------------------------------
 # Setup
@@ -382,22 +388,75 @@ def _backfill_all_chats_to_notion() -> dict[str, Any]:
     return summary
 
 
+def _hydrate_chats_from_notion() -> dict[str, Any]:
+    """List every chat page under ``NOTION_PARENT_PAGE_ID`` and create a stub
+    (``messages: []``, ``notion_page_id`` set) for any session_id we don't
+    already have. In Notion-only mode (the default when Notion is configured)
+    these stubs live in memory; otherwise they're written to disk.
+
+    Returns ``{added, already_present, ok, error}``.
+    """
+    listing = list_notion_chat_pages()
+    if not listing.get("ok"):
+        return {
+            "ok": False,
+            "added": 0,
+            "already_present": 0,
+            "error": listing.get("error"),
+        }
+
+    added = already = 0
+    for entry in listing["chats"]:
+        sid = entry["session_id"]
+        if chat_manager.load_chat(sid) is not None:
+            already += 1
+            continue
+        chat_manager.write_chat_from_messages(
+            sid,
+            entry["title"],
+            messages=[],
+            notion_page_id=entry["page_id"],
+            notion_url=entry["url"],
+        )
+        # Stubs have no messages yet, so reset synced_count to 0 - the next
+        # push will append any messages we collect locally.
+        chat_manager.update_notion_state(sid, synced_count=0)
+        added += 1
+    return {
+        "ok": True,
+        "added": added,
+        "already_present": already,
+        "error": None,
+    }
+
+
 @app.on_event("startup")
-def _startup_notion_backfill() -> None:
-    """On boot, push any existing chats to Notion so historic conversations
-    get recorded (and any newer turns get appended to existing pages)."""
-    if not (os.getenv("NOTION_API_KEY") and os.getenv("NOTION_PARENT_PAGE_ID")):
+def _startup_pull_from_notion() -> None:
+    """Fresh-clone friendly: on boot, fetch the chat list from this user's
+    own Notion parent page and hydrate the in-memory store. Each user only
+    ever sees the chats that live under THEIR configured
+    ``NOTION_PARENT_PAGE_ID``.
+
+    Message bodies are loaded lazily by ``get_session`` the first time the
+    user opens a chat, to keep startup fast.
+    """
+    mode = "in-memory + Notion" if chat_manager.use_memory_only() else "local files"
+    print(f"[chat] storage mode: {mode}")
+
+    if not chat_manager.use_memory_only():
+        print("[notion] skipped startup pull: NOTION_API_KEY / NOTION_PARENT_PAGE_ID not set.")
         return
     try:
-        result = _backfill_all_chats_to_notion()
+        result = _hydrate_chats_from_notion()
+        if not result["ok"]:
+            print(f"[notion] startup pull failed: {result['error']}")
+            return
         print(
-            f"[notion] startup backfill: synced={result['synced']} "
-            f"skipped={result['skipped']} errors={len(result['errors'])}"
+            f"[notion] startup pull: hydrated {result['added']} chat(s), "
+            f"{result['already_present']} already cached."
         )
-        for err in result["errors"]:
-            print(f"[notion]   error syncing {err['id']}: {err['error']}")
     except Exception as exc:  # noqa: BLE001
-        print(f"[notion] startup backfill failed: {exc}")
+        print(f"[notion] startup pull crashed: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +481,72 @@ def get_session(session_id: str) -> dict[str, Any]:
     chat = chat_manager.load_chat(session_id)
     if chat is None:
         raise HTTPException(404, "session not found")
+
+    # Lazy hydration: if this is a Notion-only stub (we know a page id but
+    # have no messages locally), pull the messages now. Avoids the cost of
+    # fetching every chat at boot.
+    is_stub = not chat.get("messages") and chat.get("notion_page_id")
+    if is_stub:
+        fetched = fetch_notion_page_messages(chat["notion_page_id"])
+        if fetched.get("ok"):
+            chat = chat_manager.write_chat_from_messages(
+                session_id,
+                chat.get("title") or "Restored chat",
+                fetched.get("messages", []),
+                notion_page_id=chat.get("notion_page_id"),
+                notion_url=chat.get("notion_url"),
+            )
+        else:
+            chat["notion_fetch_error"] = fetched.get("error")
     return chat
+
+
+@app.delete("/api/sessions/{session_id}")
+def delete_session(session_id: str) -> dict[str, Any]:
+    """Soft-delete: move the chat JSON to ``data/chats/_deleted/`` so it can
+    be restored via ``POST /api/sessions/{id}/restore``. The Notion copy (if
+    any) is intentionally left untouched."""
+    if not chat_manager.delete_chat(session_id):
+        raise HTTPException(404, "session not found")
+    return {"ok": True, "session_id": session_id}
+
+
+@app.post("/api/sessions/{session_id}/restore")
+def restore_session(session_id: str) -> dict[str, Any]:
+    """Undo a delete. First tries the local soft-delete backup; if there isn't
+    one but the chat was previously synced to Notion, rebuilds it from the
+    Notion page."""
+    restored = chat_manager.restore_chat(session_id)
+    if restored is not None:
+        return {"ok": True, "source": "local", "chat": restored}
+
+    # Fallback: rehydrate from Notion if we still know the page id. Look in
+    # the deleted-trash for the chat metadata we kept.
+    page_id: str | None = None
+    title: str | None = None
+    deleted_meta = chat_manager.get_deleted_metadata(session_id)
+    if deleted_meta is not None:
+        page_id = deleted_meta.get("notion_page_id")
+        title = deleted_meta.get("title")
+
+    if not page_id:
+        raise HTTPException(
+            404,
+            "No local backup and no Notion page id available - this chat "
+            "cannot be restored.",
+        )
+
+    fetched = fetch_notion_page_messages(page_id)
+    if not fetched.get("ok"):
+        raise HTTPException(502, f"Notion fetch failed: {fetched.get('error')}")
+
+    chat = chat_manager.write_chat_from_messages(
+        session_id,
+        title or f"Restored {session_id}",
+        fetched.get("messages", []),
+        notion_page_id=page_id,
+    )
+    return {"ok": True, "source": "notion", "chat": chat}
 
 
 # ---------------------------------------------------------------------------
@@ -436,6 +560,7 @@ def health() -> dict[str, Any]:
         "notion_configured": bool(
             os.getenv("NOTION_API_KEY") and os.getenv("NOTION_PARENT_PAGE_ID")
         ),
+        "chat_storage": "memory+notion" if chat_manager.use_memory_only() else "local-file",
         "chat_model": OPENAI_CHAT_MODEL,
         "asr_model": OPENAI_ASR_MODEL,
         "tts_model": OPENAI_TTS_MODEL,

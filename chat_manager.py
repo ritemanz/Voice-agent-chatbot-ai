@@ -1,27 +1,39 @@
 """
-Persistent multi-chat storage.
+Multi-chat storage with two interchangeable backends:
 
-Each chat session is a JSON file under ``data/chats/<session_id>.json``.
-A session has the schema::
+1. **Notion-backed (default when Notion is configured)** — chats live only
+   in an in-memory cache (``_MEM``) inside this process. The cache is
+   hydrated from Notion at startup, and Notion is treated as the durable
+   store (chat content is auto-pushed to Notion after every turn by
+   ``Voice_Agent_Chatbot._run_chat_with_tools`` via ``tools._sync_chat_to_notion``).
+   Nothing is written to ``data/chats/`` on disk.
+
+2. **Local-file fallback (when Notion is NOT configured)** — chats are
+   serialised to ``data/chats/<id>.json`` exactly as before, so the app
+   still works offline / without a Notion account.
+
+The mode is decided per-call (not cached) so flipping the env vars and
+restarting is enough to switch backends.
+
+Schema (both backends)::
 
     {
       "id": "...",
       "title": "...",
       "created_at": "ISO8601",
       "updated_at": "ISO8601",
-      "messages": [
-          {"role": "user"|"assistant"|"system"|"tool",
-           "content": "...",
-           "timestamp": "ISO8601",
-           "rating": "good"|"bad"|null,
-           "audio_url": "/audio/<id>.mp3" | null}
-      ]
+      "messages": [...],
+      "notion_page_id": str | null,
+      "notion_url": str | null,
+      "notion_synced_count": int,
     }
 """
 
 from __future__ import annotations
 
+import copy
 import json
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -29,25 +41,48 @@ from typing import Any
 
 DATA_DIR = Path(__file__).parent / "data"
 CHATS_DIR = DATA_DIR / "chats"
+DELETED_DIR = CHATS_DIR / "_deleted"
+
+# In-memory store used when Notion is configured. Keyed by session_id.
+_MEM: dict[str, dict[str, Any]] = {}
+_MEM_DELETED: dict[str, dict[str, Any]] = {}
 
 
+# ---------------------------------------------------------------------------
+# Mode detection
+# ---------------------------------------------------------------------------
+def _notion_configured() -> bool:
+    return bool(os.getenv("NOTION_API_KEY") and os.getenv("NOTION_PARENT_PAGE_ID"))
+
+
+def use_memory_only() -> bool:
+    """True iff chats should live only in memory + Notion (no local disk)."""
+    return _notion_configured()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 def _now() -> str:
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 
-def _ensure() -> None:
+def _ensure_disk() -> None:
     CHATS_DIR.mkdir(parents=True, exist_ok=True)
+    DELETED_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _path(session_id: str) -> Path:
     return CHATS_DIR / f"{session_id}.json"
 
 
-def create_chat(title: str | None = None) -> dict[str, Any]:
-    _ensure()
-    sid = uuid.uuid4().hex[:12]
-    chat = {
-        "id": sid,
+def _deleted_path(session_id: str) -> Path:
+    return DELETED_DIR / f"{session_id}.json"
+
+
+def _new_chat_dict(session_id: str, title: str | None) -> dict[str, Any]:
+    return {
+        "id": session_id,
         "title": title or "New chat",
         "created_at": _now(),
         "updated_at": _now(),
@@ -56,25 +91,52 @@ def create_chat(title: str | None = None) -> dict[str, Any]:
         "notion_url": None,
         "notion_synced_count": 0,
     }
+
+
+def _normalise(chat: dict[str, Any]) -> dict[str, Any]:
+    chat.setdefault("notion_page_id", None)
+    chat.setdefault("notion_url", None)
+    chat.setdefault("notion_synced_count", 0)
+    chat.setdefault("messages", [])
+    return chat
+
+
+# ---------------------------------------------------------------------------
+# CRUD: dispatches to the active backend
+# ---------------------------------------------------------------------------
+def create_chat(title: str | None = None) -> dict[str, Any]:
+    sid = uuid.uuid4().hex[:12]
+    chat = _new_chat_dict(sid, title)
+
+    if use_memory_only():
+        _MEM[sid] = chat
+        return copy.deepcopy(chat)
+
+    _ensure_disk()
     _path(sid).write_text(json.dumps(chat, indent=2), encoding="utf-8")
     return chat
 
 
 def load_chat(session_id: str) -> dict[str, Any] | None:
-    _ensure()
+    if use_memory_only():
+        chat = _MEM.get(session_id)
+        return copy.deepcopy(_normalise(chat)) if chat is not None else None
+
+    _ensure_disk()
     p = _path(session_id)
     if not p.exists():
         return None
-    chat = json.loads(p.read_text(encoding="utf-8"))
-    chat.setdefault("notion_page_id", None)
-    chat.setdefault("notion_url", None)
-    chat.setdefault("notion_synced_count", 0)
-    return chat
+    return _normalise(json.loads(p.read_text(encoding="utf-8")))
 
 
 def save_chat(chat: dict[str, Any]) -> None:
-    _ensure()
     chat["updated_at"] = _now()
+
+    if use_memory_only():
+        _MEM[chat["id"]] = copy.deepcopy(_normalise(chat))
+        return
+
+    _ensure_disk()
     _path(chat["id"]).write_text(json.dumps(chat, indent=2), encoding="utf-8")
 
 
@@ -92,6 +154,11 @@ def append_message(
     if chat is None:
         chat = create_chat()
         chat["id"] = session_id
+        # In memory mode, rewrite the auto-generated id to the requested one.
+        if use_memory_only():
+            old = chat["id"]
+            _MEM.pop(old, None)
+            _MEM[session_id] = chat
     msg: dict[str, Any] = {
         "role": role,
         "content": content,
@@ -115,36 +182,129 @@ def append_message(
 
 
 def list_chats() -> list[dict[str, Any]]:
-    _ensure()
-    out = []
-    for p in sorted(CHATS_DIR.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
-            continue
-        out.append(
-            {
-                "id": data["id"],
-                "title": data.get("title") or "Untitled",
-                "created_at": data.get("created_at"),
-                "updated_at": data.get("updated_at"),
-                "message_count": len(data.get("messages", [])),
-                "notion_url": data.get("notion_url"),
-            }
+    if use_memory_only():
+        chats = sorted(
+            _MEM.values(),
+            key=lambda c: c.get("updated_at") or "",
+            reverse=True,
         )
-    return out
+    else:
+        _ensure_disk()
+        chats = []
+        for p in sorted(CHATS_DIR.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+            try:
+                chats.append(json.loads(p.read_text(encoding="utf-8")))
+            except Exception:  # noqa: BLE001
+                continue
+
+    return [
+        {
+            "id": data["id"],
+            "title": data.get("title") or "Untitled",
+            "created_at": data.get("created_at"),
+            "updated_at": data.get("updated_at"),
+            "message_count": len(data.get("messages", [])),
+            "notion_url": data.get("notion_url"),
+        }
+        for data in chats
+    ]
 
 
 def delete_chat(session_id: str) -> bool:
-    """Delete the local JSON for this chat. Notion is intentionally left alone."""
+    """Soft-delete the chat. Notion page is intentionally left alone."""
+    if use_memory_only():
+        chat = _MEM.pop(session_id, None)
+        if chat is None:
+            return False
+        _MEM_DELETED[session_id] = chat
+        return True
+
+    _ensure_disk()
     p = _path(session_id)
     if not p.exists():
         return False
     try:
-        p.unlink()
+        target = _deleted_path(session_id)
+        if target.exists():
+            target.unlink()
+        p.replace(target)
         return True
     except OSError:
         return False
+
+
+def restore_chat(session_id: str) -> dict[str, Any] | None:
+    """Undo a soft-delete. Returns the restored chat or None."""
+    if use_memory_only():
+        chat = _MEM_DELETED.pop(session_id, None)
+        if chat is None:
+            return None
+        _MEM[session_id] = chat
+        return copy.deepcopy(chat)
+
+    _ensure_disk()
+    src = _deleted_path(session_id)
+    dst = _path(session_id)
+    if not src.exists():
+        return None
+    try:
+        if dst.exists():
+            dst.unlink()
+        src.replace(dst)
+    except OSError:
+        return None
+    return load_chat(session_id)
+
+
+def has_deleted_backup(session_id: str) -> bool:
+    if use_memory_only():
+        return session_id in _MEM_DELETED
+    return _deleted_path(session_id).exists()
+
+
+def get_deleted_metadata(session_id: str) -> dict[str, Any] | None:
+    """Return the chat dict from the soft-delete trash, without restoring it.
+    Used to recover ``notion_page_id`` if the local backup is gone."""
+    if use_memory_only():
+        chat = _MEM_DELETED.get(session_id)
+        return copy.deepcopy(chat) if chat is not None else None
+
+    p = _deleted_path(session_id)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def write_chat_from_messages(
+    session_id: str,
+    title: str,
+    messages: list[dict[str, Any]],
+    *,
+    notion_page_id: str | None = None,
+    notion_url: str | None = None,
+) -> dict[str, Any]:
+    """Create / overwrite a chat from an externally-sourced message list
+    (e.g. a Notion page). Used by both startup hydration and undo-restore."""
+    chat = {
+        "id": session_id,
+        "title": title or "Restored chat",
+        "created_at": _now(),
+        "updated_at": _now(),
+        "messages": messages,
+        "notion_page_id": notion_page_id,
+        "notion_url": notion_url,
+        "notion_synced_count": len(messages),
+    }
+    if use_memory_only():
+        _MEM[session_id] = copy.deepcopy(chat)
+        return copy.deepcopy(chat)
+
+    _ensure_disk()
+    _path(session_id).write_text(json.dumps(chat, indent=2), encoding="utf-8")
+    return chat
 
 
 def update_notion_state(
@@ -193,3 +353,11 @@ def messages_for_llm(session_id: str) -> list[dict[str, Any]]:
             item["name"] = m["name"]
         cleaned.append(item)
     return cleaned
+
+
+# ---------------------------------------------------------------------------
+# Test / housekeeping helpers
+# ---------------------------------------------------------------------------
+def _reset_memory_for_tests() -> None:
+    _MEM.clear()
+    _MEM_DELETED.clear()
